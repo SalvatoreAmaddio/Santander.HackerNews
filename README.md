@@ -84,9 +84,12 @@ Unit tests cover the main story retrieval, ordering and mapping behaviour.
 
 ## Assumptions
 
-The requirement states that the best stories should be determined by score. The application therefore retrieves the candidate stories, orders them by their numeric `score`, and then returns the first `n`.
+Story IDs are retrieved from the Hacker News `beststories` endpoint. 
+The corresponding story details are retrieved and the results are returned 
+in descending order of score, limited to the number requested by the caller.
 
-Hacker News may return optional or missing fields, which are handled defensively by the application.
+Hacker News may return optional or missing fields, which are handled 
+defensively by the application.
 
 ## Hacker News API
 
