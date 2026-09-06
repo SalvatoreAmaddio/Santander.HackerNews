@@ -9,17 +9,17 @@ public sealed class BestStoriesServiceTests
     [Fact]
     public async Task GetBestStoriesAsync_SortsByScoreDescending_AndTakesRequestedCount()
     {
-        var client = new FakeClient(
-            [1, 2, 3],
-            new Dictionary<long, HackerNewsItem?>
-            {
-                [1] = Story(1, 10),
-                [2] = Story(2, 99),
-                [3] = Story(3, 50)
-            });
+        FakeClient client = new([1, 2, 3],
+                                new Dictionary<long, HackerNewsItem?>
+                                {
+                                    [1] = Story(1, 10),
+                                    [2] = Story(2, 99),
+                                    [3] = Story(3, 50)
+                                });
 
-        var service = new BestStoriesService(client);
-        var result = await service.GetBestStoriesAsync(2, CancellationToken.None);
+        BestStoriesService service = new(client);
+
+        IReadOnlyList<StoryResponse> result = await service.GetBestStoriesAsync(2, CancellationToken.None);
 
         Assert.Equal([99, 50], result.Select(x => x.Score));
     }
@@ -27,18 +27,17 @@ public sealed class BestStoriesServiceTests
     [Fact]
     public async Task GetBestStoriesAsync_IgnoresDeadDeletedAndNonStoryItems()
     {
-        var client = new FakeClient(
-            [1, 2, 3, 4],
-            new Dictionary<long, HackerNewsItem?>
-            {
-                [1] = Story(1, 100) with { Dead = true },
-                [2] = Story(2, 90) with { Deleted = true },
-                [3] = Story(3, 80) with { Type = "job" },
-                [4] = Story(4, 70)
-            });
+        FakeClient client = new([1, 2, 3, 4],
+                                new Dictionary<long, HackerNewsItem?>
+                                {
+                                    [1] = Story(1, 100) with { Dead = true },
+                                    [2] = Story(2, 90) with { Deleted = true },
+                                    [3] = Story(3, 80) with { Type = "job" },
+                                    [4] = Story(4, 70)
+                                });
 
-        var service = new BestStoriesService(client);
-        var result = await service.GetBestStoriesAsync(10, CancellationToken.None);
+        BestStoriesService service = new(client);
+        IReadOnlyList<StoryResponse> result = await service.GetBestStoriesAsync(10, CancellationToken.None);
 
         Assert.Single(result);
         Assert.Equal(70, result[0].Score);
@@ -47,10 +46,10 @@ public sealed class BestStoriesServiceTests
     [Fact]
     public async Task GetBestStoriesAsync_MapsUnixTimeAndNullCommentCount()
     {
-        var item = Story(1, 10) with { Time = 1_700_000_000, Descendants = null };
-        var service = new BestStoriesService(new FakeClient([1], new Dictionary<long, HackerNewsItem?> { [1] = item }));
+        HackerNewsItem item = Story(1, 10) with { Time = 1_700_000_000, Descendants = null };
+        BestStoriesService service = new(new FakeClient([1], new Dictionary<long, HackerNewsItem?> { [1] = item }));
 
-        var result = await service.GetBestStoriesAsync(1, CancellationToken.None);
+        IReadOnlyList<StoryResponse> result = await service.GetBestStoriesAsync(1, CancellationToken.None);
 
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1_700_000_000), result[0].Time);
         Assert.Equal(0, result[0].CommentCount);
