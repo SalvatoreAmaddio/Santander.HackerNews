@@ -1,31 +1,23 @@
 # Santander Hacker News API
 
-ASP.NET Core REST API that returns the best `n` stories from the Hacker News API, ordered by score in descending order.
+ASP.NET Core (.NET 8) API returning the best `n` Hacker News stories in descending score order.
 
-## Requirements
+## Run
 
-- .NET 8 SDK
-
-## Running the application
-
-Clone the repository and run:
+Install the .NET 8 SDK (or a compatible newer SDK with the .NET 8 runtime), then from the repository root:
 
 ```bash
 dotnet restore
-dotnet run --project Santander.HackerNews.Api
+dotnet run --project src/Santander.HackerNews.Api --no-launch-profile --urls http://localhost:5000
 ```
 
-Alternatively, open the solution in Visual Studio and run the API project.
-
-## Usage
-
-To retrieve the best stories:
-
-```http
-GET /api/stories/best/5
+```bash
+curl http://localhost:5000/api/stories/best/5
 ```
 
-Example response:
+Alternatively, open `Santander.HackerNews.Api.sln` in Visual Studio and run the API project using its configured development ports.
+
+The response is a JSON array:
 
 ```json
 [
@@ -40,59 +32,57 @@ Example response:
 ]
 ```
 
-`n` must be greater than zero.
+`n` must be a positive 32-bit integer. Zero, negatives, nonintegers and overflowing values return HTTP 400. There is no arbitrary result cap: if fewer valid stories exist, all available valid stories are returned.
 
-## Implementation
+## Design and upstream protection
 
-The application uses the Hacker News `beststories` endpoint to retrieve candidate story IDs and then retrieves the details of each story.
+The controller validates requests, the service ranks and maps stories, and the client manages HTTP communication and caching. All candidate IDs are fetched before taking `n`: the upstream list must not be assumed to be sorted by score.
 
-Stories are ordered by score in descending order before the requested number of results is returned.
+The client is a singleton with one semaphore limiting upstream fetches across all incoming requests in this application instance. An in-flight task per resource coalesces simultaneous cache misses, including ranking-list refreshes. Completed in-flight entries are removed. Successful responses and missing items are cached; failed fetches are not cached as successful data.
 
-The application is separated into:
+The singleton uses a named `IHttpClientFactory` client created per fetch, preserving handler rotation rather than retaining a typed client indefinitely. Each fetch has a deadline covering semaphore queueing, HTTP headers, response-body reads and retries. Transient HTTP statuses (408, 429, 5xx) and transport failures are retried with exponential backoff and jitter; permanent HTTP failures are not. `Retry-After` is honored within the overall deadline. A slot stays reserved during retry backoff, keeping retrying work bounded.
 
-- **Controller** - handles the REST API request and validation.
-- **Service** - handles story ranking and mapping.
-- **HackerNewsClient** - handles communication with the Hacker News API.
+Caller cancellation ends that caller's wait without cancelling shared work needed by other callers. Shared work can finish and populate the cache; it is bounded by its deadline and cancelled when the application stops.
 
-## Performance
+## Configuration
 
-To avoid unnecessary load on the Hacker News API:
+Settings are in `src/Santander.HackerNews.Api/appsettings.json`; environment variables use the `HackerNews__` prefix, e.g. `HackerNews__MaxConcurrentUpstreamRequests=8`.
 
-- Hacker News responses are cached in memory.
-- The number of concurrent requests to Hacker News is limited.
-- Transient HTTP failures are retried with a short backoff.
-- HTTP requests have a timeout.
-- Cancellation tokens are propagated through asynchronous operations.
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| BaseUrl | https://hacker-news.firebaseio.com/v0/ | Absolute HTTP(S) URL with trailing slash |
+| MaxConcurrentUpstreamRequests | 12 | Application-wide concurrent fetch limit (1–100) |
+| RankingCacheSeconds | 20 | Candidate-list cache lifetime |
+| StoryCacheSeconds | 60 | Item cache lifetime, including missing items |
+| RetryCount | 2 | Additional attempts (0–5) |
+| FetchTimeoutSeconds | 30 | Total per-resource deadline, including queueing (greater than 0, at most 300) |
 
-This allows repeated requests to reuse cached data rather than repeatedly requesting the same information from Hacker News.
+Invalid settings fail application startup. Both cache lifetimes must be positive.
 
-## Error Handling
+## Assumptions and failure behavior
 
-Invalid values of `n` return HTTP `400 Bad Request`.
-
-Failures when communicating with Hacker News are handled by the API and return an appropriate server error response.
+- The candidate set is the Hacker News `beststories` list, not every story on Hacker News.
+- Missing, dead, deleted and non-story items are excluded. Scores are sorted descending, then creation time descending for ties; remaining ties retain candidate order.
+- Missing URLs are returned as `null` (for example text-only stories); missing titles/authors become empty strings and missing comment counts become zero. Timestamps are converted from Unix seconds to UTC.
+- Results reflect independently cached items, not an atomic live snapshot. Scores may be up to the item cache lifetime old; the candidate list has its own lifetime. Cold requests fetch every candidate even when `n=1`.
+- Any failed candidate fetch fails the request rather than silently returning an incomplete ranking. Upstream HTTP/transport errors and invalid JSON return 503; fetch deadlines return 504. Unexpected internal failures return 500. Error responses use Problem Details and omit internal exception details.
+- A null candidate list is treated as an upstream failure; an empty list returns `[]`.
+- Cache and concurrency protection are per process. Multiple replicas multiply the total upstream concurrency limit.
 
 ## Tests
 
-Run the tests with:
-
 ```bash
-dotnet test
+dotnet test Santander.HackerNews.Api.sln --configuration Release
 ```
 
-Unit tests cover the main story retrieval, ordering and mapping behaviour.
+Tests use controlled upstream HTTP handlers without accessing Hacker News. They cover service ranking/filtering/mapping, the HTTP JSON contract, invalid inputs, concurrent requests through real DI registrations, warm-cache reuse, cache expiry and missing-item caching, cancellation isolation, retry counts and recovery, stalled response bodies, invalid upstream responses and startup validation.
 
-## Assumptions
+## Enhancements with more time
 
-Story IDs are retrieved from the Hacker News `beststories` endpoint. 
-The corresponding story details are retrieved and the results are returned 
-in descending order of score, limited to the number requested by the caller.
+- Measure cold/warm latency and allocations under sustained load, and tune concurrency/cache lifetimes against an explicit latency and freshness budget.
+- For multiple replicas, coordinate refreshes and rate limits across instances or use a dedicated refresh worker with a shared snapshot.
+- Consider a bounded stale-on-error snapshot and circuit breaker for prolonged outages; define acceptable staleness with the API consumer first.
+- Add metrics for cache hits, coalesced fetches, queue time, upstream attempts and failures, plus an automated CI build/test workflow.
+- Consider caching the sorted snapshot to reduce repeated sorting under very high warm-cache traffic.
 
-Hacker News may return optional or missing fields, which are handled 
-defensively by the application.
-
-## Hacker News API
-
-Documentation:
-
-https://github.com/HackerNews/API
+Upstream documentation: https://github.com/HackerNews/API

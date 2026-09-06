@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Santander.HackerNews.Api.Models;
 using Santander.HackerNews.Api.Services;
 
@@ -10,7 +10,7 @@ public sealed class StoriesController(IBestStoriesService service) : ControllerB
 {
     private readonly IBestStoriesService StoriesService = service;
 
-    [HttpGet("best/{n:int}")]
+    [HttpGet("best/{n}")]
     public async Task<ActionResult<IReadOnlyList<StoryResponse>>> GetBestStoriesAsync([FromRoute] int n, CancellationToken cancellationToken)
     {
         if (n <= 0)

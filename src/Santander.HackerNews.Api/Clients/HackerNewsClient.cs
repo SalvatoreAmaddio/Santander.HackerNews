@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Net;
+using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using Santander.HackerNews.Api.Models;
@@ -8,100 +10,117 @@ namespace Santander.HackerNews.Api.Clients;
 
 public sealed class HackerNewsClient : IHackerNewsClient, IDisposable
 {
-    private const string BestStoriesCacheKey = "hn:beststories";
-    private readonly HttpClient Client;
-    private readonly IMemoryCache Cache;
-    private readonly HackerNewsOptions Options;
-    private readonly SemaphoreSlim UpstreamGate;
-    private readonly SemaphoreSlim RankingRefreshLock = new(1, 1);
+    public const string HttpClientName = "HackerNews";
+    private readonly IHttpClientFactory _clientFactory;
+    private readonly IMemoryCache _cache;
+    private readonly HackerNewsOptions _options;
+    private readonly CancellationToken _stopping;
+    private readonly SemaphoreSlim _upstreamGate;
+    private readonly ConcurrentDictionary<string, Lazy<Task<object?>>> _inFlight = new();
 
-    public HackerNewsClient(HttpClient httpClient, IMemoryCache cache, IOptions<HackerNewsOptions> options)
+    public HackerNewsClient(IHttpClientFactory clientFactory, IMemoryCache cache,
+                            IOptions<HackerNewsOptions> options, IHostApplicationLifetime lifetime)
     {
-        Client = httpClient;
-        Cache = cache;
-        Options = options.Value;
-        UpstreamGate = new SemaphoreSlim(Options.MaxConcurrentUpstreamRequests, Options.MaxConcurrentUpstreamRequests);
+        _clientFactory = clientFactory;
+        _cache = cache;
+        _options = options.Value;
+        _stopping = lifetime.ApplicationStopping;
+        _upstreamGate = new(_options.MaxConcurrentUpstreamRequests);
     }
 
-    public async Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken cancellationToken) =>
+        await GetCachedAsync<long[]>("beststories.json", _options.RankingCacheSeconds, cancellationToken)
+        ?? throw new HttpRequestException("Hacker News returned a null story list.");
+
+    public Task<HackerNewsItem?> GetItemAsync(long id, CancellationToken cancellationToken) =>
+        GetCachedAsync<HackerNewsItem>($"item/{id}.json", _options.StoryCacheSeconds, cancellationToken);
+
+    private async Task<T?> GetCachedAsync<T>(string path, int cacheSeconds, CancellationToken cancellationToken)
+        where T : class
     {
-        if (Cache.TryGetValue(BestStoriesCacheKey, out IReadOnlyList<long>? cached) && cached is not null)
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_cache.TryGetValue(path, out T? cached))
             return cached;
 
-        await RankingRefreshLock.WaitAsync(cancellationToken);
+        Lazy<Task<object?>> pending = _inFlight.GetOrAdd(path, _ => new(() => RefreshAsync<T>(path, cacheSeconds)));
+        // A disconnected caller stops waiting, but cannot cancel work needed by other callers.
+        return (T?)await pending.Value.WaitAsync(cancellationToken);
+    }
 
+    private async Task<object?> RefreshAsync<T>(string path, int cacheSeconds) where T : class
+    {
         try
         {
-            if (Cache.TryGetValue(BestStoriesCacheKey, out cached) && cached is not null)
+            if (_cache.TryGetValue(path, out T? cached))
                 return cached;
 
-            IReadOnlyList<long> ids = await SendAsync<IReadOnlyList<long>>("beststories.json", cancellationToken) ?? [];
-            Cache.Set(BestStoriesCacheKey, ids, TimeSpan.FromSeconds(Options.RankingCacheSeconds));
-            return ids;
+            T? value = await SendAsync<T>(path);
+            if (value is null && typeof(T) == typeof(long[]))
+                throw new HttpRequestException("Hacker News returned a null story list.");
+            // Cache missing items too, to avoid repeatedly fetching unavailable stories.
+            _cache.Set(path, value, TimeSpan.FromSeconds(cacheSeconds));
+            return value;
         }
         finally
         {
-            RankingRefreshLock.Release();
+            _inFlight.TryRemove(path, out _);
         }
     }
 
-    public async Task<HackerNewsItem?> GetItemAsync(long id, CancellationToken cancellationToken)
+    private async Task<T?> SendAsync<T>(string path)
     {
-        string key = $"hn:item:{id}";
-
-        if (Cache.TryGetValue(key, out HackerNewsItem? cached))
-            return cached;
-
-        HackerNewsItem? item = await SendAsync<HackerNewsItem>($"item/{id}.json", cancellationToken);
-
-        if (item is not null)
-            Cache.Set(key, item, TimeSpan.FromSeconds(Options.StoryCacheSeconds));
-
-        return item;
-    }
-
-    private async Task<T?> SendAsync<T>(string path, CancellationToken cancellationToken)
-    {
-        await UpstreamGate.WaitAsync(cancellationToken);
-
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stopping);
+        deadline.CancelAfter(TimeSpan.FromSeconds(_options.FetchTimeoutSeconds));
+        CancellationToken token = deadline.Token;
         try
         {
-            for (int attempt = 0; ; attempt++)
+            // The deadline includes queueing, retry delays, headers and body consumption.
+            await _upstreamGate.WaitAsync(token);
+            try
             {
-                try
+                using HttpClient client = _clientFactory.CreateClient(HttpClientName);
+                for (int attempt = 0; ; attempt++)
                 {
-                    using HttpResponseMessage response = await Client.GetAsync(path, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    TimeSpan delay = TimeSpan.FromMilliseconds(150 * Math.Pow(2, attempt) + Random.Shared.Next(25, 125));
+                    try
+                    {
+                        using HttpResponseMessage response = await client.GetAsync(path, HttpCompletionOption.ResponseHeadersRead, token);
+                        if (response.IsSuccessStatusCode)
+                            return await response.Content.ReadFromJsonAsync<T>(cancellationToken: token);
 
-                    if (response.IsSuccessStatusCode)
-                        return await response.Content.ReadFromJsonAsync<T>(cancellationToken: cancellationToken);
+                        if (!IsTransient(response.StatusCode) || attempt >= _options.RetryCount)
+                            throw new HttpRequestException($"Hacker News returned {(int)response.StatusCode}.", null, response.StatusCode);
 
-                    if (!IsTransient(response.StatusCode) || attempt >= Options.RetryCount)
-                        throw new HttpRequestException($"Hacker News returned {(int)response.StatusCode} ({response.StatusCode}).", null, response.StatusCode);
+                        TimeSpan? retryAfter = response.Headers.RetryAfter?.Delta
+                            ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow);
+                        if (retryAfter > delay)
+                            delay = retryAfter.Value;
+                    }
+                    catch (HttpRequestException exception) when (attempt < _options.RetryCount &&
+                        (exception.StatusCode is null || IsTransient(exception.StatusCode.Value)))
+                    {
+                        // Transport errors and transient statuses only; permanent failures escape.
+                    }
+                    await Task.Delay(delay, token);
                 }
-                catch (HttpRequestException) when (attempt < Options.RetryCount)
-                {
-                    // Retry below. Cancellation is deliberately not swallowed.
-                }
-
-                TimeSpan delay = TimeSpan.FromMilliseconds(150 * Math.Pow(2, attempt) + Random.Shared.Next(25, 125));
-
-                await Task.Delay(delay, cancellationToken);
+            }
+            finally
+            {
+                _upstreamGate.Release();
             }
         }
-        finally
+        catch (OperationCanceledException exception) when (!_stopping.IsCancellationRequested)
         {
-            UpstreamGate.Release();
+            throw new TimeoutException("Hacker News fetch exceeded its deadline.", exception);
+        }
+        catch (JsonException exception)
+        {
+            throw new HttpRequestException("Hacker News returned invalid JSON.", exception);
         }
     }
 
-    private static bool IsTransient(HttpStatusCode statusCode)
-    {
-        return statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
-    }
+    private static bool IsTransient(HttpStatusCode statusCode) =>
+        statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
-    public void Dispose()
-    {
-        UpstreamGate.Dispose();
-        RankingRefreshLock.Dispose();
-    }
+    public void Dispose() => _upstreamGate.Dispose();
 }
