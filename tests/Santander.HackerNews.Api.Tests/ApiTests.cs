@@ -275,6 +275,31 @@ public sealed class ApiTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal(0, calls);
     }
+
+    [Fact]
+    public async Task BodyTransportFailure_Returns503()
+    {
+        using ApiFactory factory = new((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new BrokenStream())
+            }));
+
+        using HttpClient client = factory.CreateClient();
+        using HttpResponseMessage response = await client.GetAsync("/api/v1/stories/best/1");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    private sealed class BrokenStream : MemoryStream
+    {
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+            => ValueTask.FromException<int>(
+                new IOException("Connection reset during body read"));
+    }
+
     private static HttpResponseMessage Json<T>(T value) => new(HttpStatusCode.OK) { Content = JsonContent.Create(value) };
 
     internal sealed class ApiFactory(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send, double timeout = 30, int cacheSeconds = 60, int concurrency = 2) : WebApplicationFactory<Program>
