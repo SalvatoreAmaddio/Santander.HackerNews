@@ -22,7 +22,7 @@ Alternatively, open the solution in Visual Studio and run the API project.
 To retrieve the best stories:
 
 ```http
-GET /api/stories/best?n=5
+GET /api/stories/best/5
 ```
 
 Example response:
