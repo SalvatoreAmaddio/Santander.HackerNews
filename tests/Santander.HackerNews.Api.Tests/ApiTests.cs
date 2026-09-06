@@ -277,12 +277,13 @@ public sealed class ApiTests
     }
     private static HttpResponseMessage Json<T>(T value) => new(HttpStatusCode.OK) { Content = JsonContent.Create(value) };
 
-    private sealed class ApiFactory(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send, double timeout = 30, int cacheSeconds = 60, int concurrency = 2) : WebApplicationFactory<Program>
+    internal sealed class ApiFactory(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send, double timeout = 30, int cacheSeconds = 60, int concurrency = 2) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
+                ["Logging:LogLevel:System.Net.Http.HttpClient"] = "Warning",
                 ["HackerNews:MaxConcurrentUpstreamRequests"] = concurrency.ToString(),
                 ["HackerNews:FetchTimeoutSeconds"] = timeout.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["HackerNews:RankingCacheSeconds"] = cacheSeconds.ToString(),

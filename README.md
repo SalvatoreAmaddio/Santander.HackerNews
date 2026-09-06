@@ -98,3 +98,17 @@ Tests use controlled upstream HTTP handlers without accessing Hacker News. They 
 - Consider caching the sorted snapshot to reduce repeated sorting under very high warm-cache traffic.
 
 Upstream documentation: https://github.com/HackerNews/API
+
+## High-volume integration test
+
+Run the load regression test with timing output:
+
+```bash
+dotnet test Santander.HackerNews.Api.sln --configuration Release --filter "Category=Load" --logger "console;verbosity=detailed"
+```
+
+It sends 3,000 HTTP requests through the in-memory ASP.NET Core test host, with up to 100 concurrent callers and 200 simulated candidate stories. Three phases exercise a cold cache, a warm cache, and a refresh after explicit cache invalidation. Every response must succeed and contain the requested number of correctly ranked stories. The test asserts exactly 201 upstream calls on cold load, no additional calls on warm load, and 201 more after invalidation, with upstream concurrency never exceeding 12. The fake upstream introduces a 5 ms asynchronous delay and never calls Hacker News.
+
+Output includes elapsed time, observed requests/second, p95/p99 latency, upstream calls and peak upstream concurrency. Timing includes reading and checking responses. These timings are diagnostic, not production throughput claims: the generator, application and fake upstream share one process, and traffic is bounded-concurrency rather than a fixed arrival rate. No machine-dependent latency threshold is asserted; a two-minute cancellation deadline guards against hangs. Cache lifetimes are extended for this test so each phase measures the intended cache state. The separate expiry test checks actual TTL expiration.
+
+The test also runs with the full suite. Use `--filter "Category!=Load"` to omit it. For deployment capacity, use an external load generator against Kestrel on representative hardware and measure CPU, memory and latency under sustained traffic.
