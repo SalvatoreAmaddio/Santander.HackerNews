@@ -1,3 +1,4 @@
+using Asp.Versioning;
 using Microsoft.AspNetCore.Mvc;
 using Santander.HackerNews.Api.Models;
 using Santander.HackerNews.Api.Services;
@@ -5,7 +6,8 @@ using Santander.HackerNews.Api.Services;
 namespace Santander.HackerNews.Api.Controller;
 
 [ApiController]
-[Route("api/stories")]
+[ApiVersion(1.0)]
+[Route("api/v{version:apiVersion}/stories")]
 public sealed class StoriesController(IBestStoriesService service) : ControllerBase
 {
     private readonly IBestStoriesService StoriesService = service;

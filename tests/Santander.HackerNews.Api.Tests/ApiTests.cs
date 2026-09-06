@@ -45,7 +45,7 @@ public sealed class ApiTests
 
         using HttpClient client = factory.CreateClient();
 
-        Task<HttpResponseMessage>[] requests = Enumerable.Range(0, 30).Select(_ => client.GetAsync("/api/stories/best/2")).ToArray();
+        Task<HttpResponseMessage>[] requests = Enumerable.Range(0, 30).Select(_ => client.GetAsync("/api/v1/stories/best/2")).ToArray();
 
         try 
         { 
@@ -74,7 +74,7 @@ public sealed class ApiTests
             }
         }
 
-        using HttpResponseMessage warm = await client.GetAsync("/api/stories/best/4");
+        using HttpResponseMessage warm = await client.GetAsync("/api/v1/stories/best/4");
         Assert.Equal(HttpStatusCode.OK, warm.StatusCode);
         Assert.Equal(5, calls);
         Assert.Equal(2, maximum);
@@ -93,7 +93,7 @@ public sealed class ApiTests
 
         using HttpClient client = factory.CreateClient();
 
-        using HttpResponseMessage response = await client.GetAsync($"/api/stories/best/{count}");
+        using HttpResponseMessage response = await client.GetAsync($"/api/v1/stories/best/{count}");
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal(0, calls);
     }
@@ -115,7 +115,7 @@ public sealed class ApiTests
 
         using HttpClient client = factory.CreateClient();
         
-        using HttpResponseMessage response = await client.GetAsync("/api/stories/best/1");
+        using HttpResponseMessage response = await client.GetAsync("/api/v1/stories/best/1");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType!.MediaType);
@@ -134,7 +134,7 @@ public sealed class ApiTests
         });
 
         using HttpClient client = factory.CreateClient();
-        using HttpResponseMessage response = await client.GetAsync("/api/stories/best/1");
+        using HttpResponseMessage response = await client.GetAsync("/api/v1/stories/best/1");
         
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(2, calls);
@@ -149,7 +149,7 @@ public sealed class ApiTests
         }), timeout: 0.2);
 
         using HttpClient client = factory.CreateClient();
-        using HttpResponseMessage response = await client.GetAsync("/api/stories/best/1").WaitAsync(TimeSpan.FromSeconds(10));
+        using HttpResponseMessage response = await client.GetAsync("/api/v1/stories/best/1").WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
     }
@@ -203,8 +203,8 @@ public sealed class ApiTests
                                                                  : Json(Array.Empty<int>())));
 
         using HttpClient client = factory.CreateClient();
-        using HttpResponseMessage failed = await client.GetAsync("/api/stories/best/1");
-        using HttpResponseMessage recovered = await client.GetAsync("/api/stories/best/1");
+        using HttpResponseMessage failed = await client.GetAsync("/api/v1/stories/best/1");
+        using HttpResponseMessage recovered = await client.GetAsync("/api/v1/stories/best/1");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
         Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
@@ -242,6 +242,39 @@ public sealed class ApiTests
         Assert.Throws<OptionsValidationException>(() => factory.CreateClient());
     }
 
+    [Theory]
+    [InlineData("v1")]
+    [InlineData("v1.0")]
+    public async Task SupportedVersion_ReturnsResultsAndReportsVersion(string version)
+    {
+        using ApiFactory factory = new((_, _) => Task.FromResult(Json(Array.Empty<int>())));
+        using HttpClient client = factory.CreateClient();
+        using HttpResponseMessage response = await client.GetAsync($"/api/{version}/stories/best/1");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("[]", await response.Content.ReadAsStringAsync());
+        Assert.Contains("1.0", response.Headers.GetValues("api-supported-versions"));
+    }
+
+    [Theory]
+    [InlineData("/api/v2/stories/best/1")]
+    [InlineData("/api/v1.1/stories/best/1")]
+    [InlineData("/api/vinvalid/stories/best/1")]
+    [InlineData("/api/stories/best/1")]
+    public async Task MissingOrUnsupportedVersion_Returns404WithoutUpstreamCalls(string path)
+    {
+        int calls = 0;
+        using ApiFactory factory = new((_, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(Json(Array.Empty<int>()));
+        });
+        using HttpClient client = factory.CreateClient();
+        using HttpResponseMessage response = await client.GetAsync(path);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(0, calls);
+    }
     private static HttpResponseMessage Json<T>(T value) => new(HttpStatusCode.OK) { Content = JsonContent.Create(value) };
 
     private sealed class ApiFactory(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send, double timeout = 30, int cacheSeconds = 60, int concurrency = 2) : WebApplicationFactory<Program>

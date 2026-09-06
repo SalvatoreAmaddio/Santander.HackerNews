@@ -12,7 +12,7 @@ dotnet run --project src/Santander.HackerNews.Api --no-launch-profile --urls htt
 ```
 
 ```bash
-curl http://localhost:5000/api/stories/best/5
+curl http://localhost:5000/api/v1/stories/best/5
 ```
 
 Alternatively, open `Santander.HackerNews.Api.sln` in Visual Studio and run the API project using its configured development ports.
@@ -33,6 +33,18 @@ The response is a JSON array:
 ```
 
 `n` must be a positive 32-bit integer. Zero, negatives, nonintegers and overflowing values return HTTP 400. There is no arbitrary result cap: if fewer valid stories exist, all available valid stories are returned.
+
+## API versioning
+
+The API uses URL-segment versioning through `Asp.Versioning.Mvc`:
+
+```http
+GET /api/v1/stories/best/5
+```
+
+Version `1.0` is currently supported (`v1` and `v1.0` are equivalent). Responses report supported versions in the `api-supported-versions` header. The version must be supplied in the URL; the previous unversioned route `/api/stories/best/5` and unsupported versions return 404. Update existing callers to use `/api/v1/stories/best/{n}`.
+
+Breaking contract changes should introduce a new explicitly declared API version, allowing existing clients to keep using v1. Versioning is configured for controllers with `AddApiVersioning(...).AddMvc()` and `[ApiVersion(1.0)]`; query parameters and headers do not select versions.
 
 ## Design and upstream protection
 

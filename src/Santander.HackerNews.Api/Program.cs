@@ -1,3 +1,4 @@
+using Asp.Versioning;
 using Microsoft.Extensions.Options;
 using Santander.HackerNews.Api;
 using Santander.HackerNews.Api.Clients;
@@ -21,6 +22,11 @@ builder.Services.AddOptions<HackerNewsOptions>()
 
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddControllers();
+builder.Services.AddApiVersioning(options =>
+{
+    options.ApiVersionReader = new UrlSegmentApiVersionReader();
+    options.ReportApiVersions = true;
+}).AddMvc();
 
 builder.Services.AddHttpClient(HackerNewsClient.HttpClientName, (sp, client) =>
 {
